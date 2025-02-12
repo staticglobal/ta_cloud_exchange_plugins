@@ -89,6 +89,24 @@
       "description": "Type of Threat data to pull. Allowed values are Hash [SHA256], Hash [MD5], Domain, URL, IP, IPv6."
     },
     {
+      "label": "Include All Sub-Domains",
+      "key": "domain_include_subdomains",
+      "type": "choice",
+      "choices": [
+        {
+          "key": "Yes",
+          "value": "1"
+        },
+        {
+          "key": "No",
+          "value": "0"
+        }
+      ],
+      "default": "0",
+      "mandatory": false,
+      "description": "Include all sub-domains of Domain-based threat entries."
+    },
+    {
       "label": "Minimum Confidence",
       "key": "confidence",
       "type": "number",

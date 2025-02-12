@@ -924,6 +924,11 @@ class AnomaliThreatstreamPlugin(PluginBase):
                         elif self._validate_domain(indicator.value):
                             payload["domain"] = indicator.value
                             payload["itype"] = domain_itype
+                            if self.configuration.get("domain_include_subdomains", "0") == "1":
+                                # Inject an additional wildcard domain entry to match all sub-domains
+                                subdomain_payload = payload.copy()
+                                subdomain_payload["domain"] = f"*.{indicator.value}"
+                                objects.append(subdomain_payload)
                         else:
                             skipped_count += 1
                             continue
@@ -1380,6 +1385,7 @@ class AnomaliThreatstreamPlugin(PluginBase):
             "user_name": user_name,
             "api_key": api_key,
             "indicator_type": configuration.get("indicator_type", []),
+            "domain_include_subdomains": configuration.get("domain_include_subdomains", "0"),
             "severity": configuration.get("severity", ""),
             "status": configuration.get("status", "")
         }
