@@ -29,15 +29,40 @@ CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-CTE ExtraHop Reveal(x) 360 plugin constants.
+CRE Bitsight plugin constants.
 """
 
-MODULE_NAME = "CTE"
-PLUGIN_NAME = "ExtraHop Reveal(x) 360"
+PLATFORM_NAME = "Bitsight"
+MODULE_NAME = "CRE"
 PLUGIN_VERSION = "1.0.0"
-PLATFORM_NAME = "ExtraHop Reveal(x) 360"
 DEFAULT_WAIT_TIME = 60
 MAX_API_CALLS = 4
 PAGE_LIMIT = 1000
-MAX_PAGES = 100
+COMPANIES_LIMIT = 10000
+INTEGER_THRESHOLD = 4611686018427387904
+MAX_TIERS = 5
 
+ENTITY_NAME = "Companies"
+BASE_URL = "https://api.bitsighttech.com"
+API_ENDPOINTS = {
+    "portfolio": f"{BASE_URL}/ratings/v2/portfolio",
+    "companies": BASE_URL + "/v1/tiers/{tier_guid}/companies",
+    "get_teirs": BASE_URL + "/ratings/v1/tiers",
+    "get_company_details": BASE_URL + "/ratings/v1/companies/{company_guid}",
+    "create_tier": BASE_URL + "/ratings/v1/tiers",
+}
+NETSKOPE_NORMALIZED_SCORE = "Netskope Normalized Score"
+COMPANY_FIELD_MAPPING = {
+    "Company GUID": {"key": "guid"},
+    "Security Rating": {"key": "rating", "transformation": "integer"},
+    "Company Name": {
+        "key": "name",
+    },
+    "Rating Type": {"key": "type"},
+    "Primary Domain": {"key": "primary_domain"},
+    "Tier GUID": {"key": "tier"},
+    "Tier Name": {"key": "tier_name"},
+    "Confidence": {
+        "key": "details.confidence",
+    },
+}

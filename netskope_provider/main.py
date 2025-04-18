@@ -10,7 +10,6 @@ from typing import Dict, List
 from urllib.parse import urlparse
 
 import requests
-from netskope.common.models import NetskopeFieldType
 from netskope.common.models.other import NotificationType
 from netskope.common.utils import (
     Notifier,
@@ -26,20 +25,22 @@ from netskope.common.utils.provider_plugin_base import (
     PluginBase,
     ValidationResult,
 )
+from netskope.common.models import NetskopeFieldType, FieldDataType
+from netskope_api.iterator.netskope_iterator import NetskopeIterator
 
 from .utils.iterator_helper import (
-    EVENTS,
     NetskopeClient,
     NetskopeIteratorBuilder,
 )
 from .utils.router_helper import get_all_subtypes
 from .utils.webtx_metrics_collector import get_webtx_metrics_data
 from .utils.webtx_parser import WebtxParser
-
-MODULE_NAME = "TENANT"
-PLUGIN_VERSION = "1.1.0"
-PLATFORM_NAME = "Netskope"
-DOCS_URL = "https://docs.netskope.com/en/netskope-help/integrations-439794/netskope-cloud-exchange/get-started-with-cloud-exchange/configure-netskope-tenants/#v2-rest-api-scopes"  # NOQA
+from .utils import constants as CONST
+from .utils.iterator_api_helper import (
+    NetskopePluginHelper,
+    IteratorAlreadyExists,
+    NetskopeProviderPluginException
+)
 
 plugin_provider_helper = PluginProviderHelper()
 notifier = Notifier()
@@ -73,9 +74,15 @@ class NetskopeProviderPlugin(PluginBase):
             **kwargs,
         )
         self.plugin_name, self.plugin_version = self._get_plugin_info()
-        self.log_prefix = f"{MODULE_NAME} {self.plugin_name}"
+        self.log_prefix = f"{CONST.MODULE_NAME} {self.plugin_name}"
         if name:
             self.log_prefix = f"{self.log_prefix} [{name}]"
+        self.netskope_provider_helper = NetskopePluginHelper(
+            logger=self.logger,
+            log_prefix=self.log_prefix,
+            plugin_name=self.plugin_name,
+            plugin_version=self.plugin_version,
+        )
 
     def _get_plugin_info(self) -> tuple:
         """Get plugin name and version from manifest.
@@ -85,20 +92,20 @@ class NetskopeProviderPlugin(PluginBase):
         """
         try:
             manifest_json = NetskopeProviderPlugin.metadata
-            plugin_name = manifest_json.get("name", PLATFORM_NAME)
-            plugin_version = manifest_json.get("version", PLUGIN_VERSION)
+            plugin_name = manifest_json.get("name", CONST.PLATFORM_NAME)
+            plugin_version = manifest_json.get("version", CONST.PLUGIN_VERSION)
             return (plugin_name, plugin_version)
         except Exception as exp:
             self.logger.error(
                 message=(
                     "{} {}: Error occurred while"
                     " getting plugin details. Error: {}".format(
-                        MODULE_NAME, PLATFORM_NAME, exp
+                        CONST.MODULE_NAME, CONST.PLATFORM_NAME, exp
                     )
                 ),
                 details=traceback.format_exc(),
             )
-        return (PLATFORM_NAME, PLUGIN_VERSION)
+        return (CONST.PLATFORM_NAME, CONST.PLUGIN_VERSION)
 
     @classmethod
     def supported_subtypes(cls):
@@ -168,6 +175,7 @@ class NetskopeProviderPlugin(PluginBase):
                 return_response=True,
                 epoch=int(time.time()) + 60,
                 headers=headers,
+                log_prefix=self.log_prefix,
             )
             # Reduce the response wait time for 401 or 403 status codes while validating v2 token.
             iterator.client.TOKEN_ERROR_WAIT_TIME = 0
@@ -275,7 +283,7 @@ class NetskopeProviderPlugin(PluginBase):
         """Remove tenant from banner."""
         new_message = (
             "Configure tenant(s) **{}** "
-            "with V2 token. Navigate to Settings > Netskope Tenants to update tenants with V2 token. "
+            "with V2 API Token. Navigate to Settings > Netskope Tenants to update tenants with V2 API Token. "
         )
         self.remove_tenant_from_banner(
             banner_id="BANNER_ERROR_1000",
@@ -285,7 +293,7 @@ class NetskopeProviderPlugin(PluginBase):
         new_message = (
             "Netskope API token of tenant **{}** has been revoked, deleted or has insufficient privileges "
             "to continue pulling alerts and events from Netskope."
-            + f" Please check the **[required privileges]({DOCS_URL})** and ensure that your API token has "
+            + f" Please check the **[required privileges]({CONST.DOCS_URL})** and ensure that your API token has "
             "the necessary permissions to access the required resources."
         )
         self.remove_tenant_from_banner(
@@ -380,7 +388,7 @@ class NetskopeProviderPlugin(PluginBase):
                 details=", ".join(forbidden_endpoints),
             )
             raise ValueError(
-                "The Netskope tenant API V2 token does not have the necessary permissions configured."
+                "The Netskope tenant V2 API Token does not have the necessary permissions configured."
                 " Refer to the list of endpoints for which the token "
                 f"is missing permissions: {', '.join(forbidden_endpoints)}"
             )
@@ -435,13 +443,15 @@ class NetskopeProviderPlugin(PluginBase):
                     pass
             data, status_code = get_webtx_metrics_data(
                 self.log_prefix,
-                self.configuration["tenantName"],
+                self.configuration.get("tenantName", "").strip().rstrip("/"),
                 self.configuration["v2token"],
                 self.proxy,
             )
             if data and status_code == 200:
                 plugin_provider_helper.replace_webtx_metrics(
-                    self.configuration["tenantName"], self.name, data
+                    self.configuration.get("tenantName", "").strip().rstrip("/"),
+                    self.name,
+                    data
                 )
                 data = plugin_provider_helper.get_webtx_metrics(self.name)
             elif existing_data:
@@ -522,6 +532,7 @@ class NetskopeProviderPlugin(PluginBase):
             handle_forbidden=handle_forbidden,
             **other_parameters,
             headers=headers,
+            log_prefix=self.log_prefix,
             compress_historical_data=compress_historical_data,
         )
         if not override_subtypes:
@@ -579,8 +590,10 @@ class NetskopeProviderPlugin(PluginBase):
                 sub_type = item.get("event_type", None)
             if not item_id:
                 item_id = item.get("id")
-            for field in item.keys():
+            for field, field_value in item.items():
                 if field in fields:
+                    continue
+                if not field_value:
                     continue
                 field_obj = plugin_provider_helper.get_stored_field(field)
                 if (
@@ -588,14 +601,14 @@ class NetskopeProviderPlugin(PluginBase):
                     and field_obj is None
                 ):
                     self.logger.info(
-                        f"{self.log_prefix}: The CE platform has detected new field '{field}' in the WebTx log"
-                        f" with id {item_id}. Configure CLS to use this field if you wish to sent it to the SIEM."
+                        f"{self.log_prefix}: The CE platform has detected new field '{field}' in the WebTx logs."
+                        " Configure CLS to use this field if you wish to sent it to the SIEM."
                     )
                     notifier.info(
-                        f"The CE platform has detected new field '{field}' in the WebTx log"
-                        f" with id {item_id}. Configure CLS to use this field if you wish to sent it to the SIEM."
+                        f"The CE platform has detected new field '{field}' in the WebTx logs."
+                        " Configure CLS to use this field if you wish to sent it to the SIEM."
                     )
-                elif sub_type not in EVENTS.keys() and field_obj is None:
+                elif sub_type not in CONST.EVENTS.keys() and field_obj is None:
                     self.logger.info(
                         f"{self.log_prefix}: The CE platform has detected new field '{field}' in the {sub_type}"
                         f" alert with id {item_id}. Configure CLS to use this field if you wish to sent it to the SIEM."
@@ -622,9 +635,112 @@ class NetskopeProviderPlugin(PluginBase):
                         f" event with id {item_id}. Configure CLS to use this field if you wish to sent it to the SIEM."
                     )
 
-                plugin_provider_helper.store_new_field(field, typeOfField)
+                datatype = (
+                    FieldDataType.BOOLEAN
+                    if isinstance(field_value, bool)
+                    else (
+                        FieldDataType.NUMBER
+                        if isinstance(field_value, int)
+                        or isinstance(field_value, float)
+                        else FieldDataType.TEXT
+                    )
+                )
+                plugin_provider_helper.store_new_field(
+                    field, typeOfField, datatype
+                )
 
             fields = fields.union(item.keys())
+
+    def client_status_validation(self): 
+        """Validate client status endpoint."""
+        iterator_name = CONST.CLIENT_STATUS_ITERATOR_NAME
+        tenant_name = self.configuration.get("tenantName", "").strip().rstrip("/")
+        headers = {
+            "Authorization": f"Bearer {self.configuration.get('v2token')}",
+        }
+        try:
+            if self.storage and self.storage.get("client_status_iterator", ""):
+                # Check the iterator status
+                iterator_name = self.storage.get("client_status_iterator", "")
+                logger_msg = f"Checking status of iterator with name {iterator_name}"
+                iterator_status_endpoint = (
+                    f"{tenant_name}/api/v2/events/dataexport/iterator/{iterator_name}"
+                )
+                resp = self.netskope_provider_helper.api_helper(
+                    logger_msg=logger_msg,
+                    url=iterator_status_endpoint,
+                    method="GET",
+                    headers=headers,
+                    proxies=self.proxy,
+                    is_handle_error_required=False,
+                    is_validation=True,
+                )
+                if resp.status_code == 200:
+                    log_msg = (
+                        f"Successfully validated status of iterator "
+                        f"with name {iterator_name}"
+                    )
+                    self.logger.info(
+                        f"{self.log_prefix}: {log_msg}",
+                        details=f"API Response: {resp.text}"
+                    )
+                    return True
+                elif (
+                    resp.status_code == 404
+                    and "does not exist" in resp.text
+                ):
+                    log_msg = (
+                        "The iterator stored in the storage "
+                        f"with name {iterator_name} does not exist. "
+                        "Attempting to create a new iterator."
+                    )
+                    self.logger.info(
+                        f"{self.log_prefix}: {log_msg}",
+                        details=f"API Response: {resp.text}"
+                    )
+                    self.netskope_provider_helper.create_iterator(
+                        tenant_url=tenant_name,
+                        tenant_configuration_name=self.name,
+                        headers=headers,
+                        iterator_name=CONST.CLIENT_STATUS_ITERATOR_NAME,
+                        proxies=self.proxy,
+                        is_validation=True
+                    )
+                else:
+                    self.netskope_provider_helper.handle_error(
+                        resp,
+                        logger_msg,
+                        is_validation=True
+                    )
+            else:
+                self.netskope_provider_helper.create_iterator(
+                    tenant_url=tenant_name,
+                    tenant_configuration_name=self.name,
+                    headers=headers,
+                    iterator_name=iterator_name,
+                    proxies=self.proxy,
+                    is_validation=True
+                )
+        except IteratorAlreadyExists as err:
+            error_msg = (
+                f"Error while creating iterator with name {iterator_name}. "
+                f"{str(err)}"
+            )
+            self.logger.error(
+                f"{self.log_prefix}: {error_msg}"
+            )
+            raise NetskopeProviderPluginException(error_msg)
+        except NetskopeProviderPluginException as err:
+            raise NetskopeProviderPluginException(err)
+        except Exception as err:
+            error_msg = (
+                f"Error while creating iterator with name {iterator_name}."
+            )
+            self.logger.error(
+                f"{self.log_prefix}: {error_msg} Error: {str(err)}",
+                details=traceback.format_exc(),
+            )
+            raise NetskopeProviderPluginException(error_msg)
 
     def validate_token(self, token, tenant_name):
         """Validate v1 API Token."""
@@ -684,7 +800,7 @@ class NetskopeProviderPlugin(PluginBase):
 
         validation_err_msg = "Validation error occurred."
 
-        tenant_name = configuration.get("tenantName", "").strip()
+        tenant_name = configuration.get("tenantName", "").strip().rstrip("/")
         if not tenant_name:
             err_msg = (
                 "Tenant must have a Tenant URL. Please provide a Tenant URL."
@@ -741,7 +857,7 @@ class NetskopeProviderPlugin(PluginBase):
 
         v2_token = configuration.get("v2token", "")
         if not v2_token:
-            err_msg = "Tenant must have V2 token. Please provide V2 token."
+            err_msg = "Tenant must have V2 API Token. Please provide V2 API Token."
             self.logger.error(
                 f"{self.log_prefix}: {validation_err_msg} {err_msg}"
             )
@@ -749,7 +865,7 @@ class NetskopeProviderPlugin(PluginBase):
                 success=False, message=err_msg, checkpoint=checkpoint
             )
         elif not isinstance(tenant_name, str):
-            err_msg = "Invalid v2 token provided."
+            err_msg = "Invalid V2 API Token provided."
             self.logger.error(
                 f"{self.log_prefix}: {validation_err_msg} {err_msg}"
             )
@@ -762,7 +878,7 @@ class NetskopeProviderPlugin(PluginBase):
             plugin_name=self.plugin_name,
             configuration_name=self.name,
         ):
-            message = "Error occurred while validating v2 token"
+            message = "Error occurred while validating V2 API Token"
             self.logger.error(
                 f"{self.log_prefix}: {validation_err_msg} {message}",
                 error_code="CE_1127",
@@ -805,23 +921,122 @@ class NetskopeProviderPlugin(PluginBase):
             checkpoint=checkpoint,
         )
 
-    def cleanup(self, configuration) -> None:
+    def cleanup(self, configuration, is_validation=False) -> None:
         """Remove all related dependencies of the record before its deletion, ensuring data integrity."""
-        tenant_name = configuration.get("tenantName")
-        tenants = plugin_provider_helper.list_tenants()
-
-        if len(tenants) == 1:
-            banners = [
-                "BANNER_ERROR_0999",
-                "BANNER_ERROR_1000",
-                "BANNER_ERROR_1001",
-                "BANNER_ERROR_1002",
-                "BANNER_ERROR_1003",
-                "BANNER_WARN_1000",
-            ]
-            for banner in banners:
-                notifier.update_banner_acknowledged(
-                    id=banner, acknowledged=True
+        # Delete the Client Status iterator from the storage
+        try:
+            tenant_name = configuration.get("tenantName", "").strip().rstrip("/")
+            v2token = configuration.get("v2token", "")
+            client_status_iterator = self.storage.get(
+                "client_status_iterator", ""
+            ) if self.storage else ""
+            if client_status_iterator:
+                delete_cs_endpoint = (
+                    f"{tenant_name}/api/v2/events/dataexport/iterator/{client_status_iterator}"
                 )
-        else:
-            self.update_banner(tenant_name)
+                headers = {
+                'accept': 'application/json',
+                'Authorization': f'Bearer {v2token}'
+                }
+                logger_msg = (
+                    f"Deleting Client Status Iterator {client_status_iterator} "
+                    f"for tenant {tenant_name}"
+                )
+                self.netskope_provider_helper.api_helper(
+                    logger_msg=logger_msg,
+                    url=delete_cs_endpoint,
+                    method="DELETE",
+                    headers=headers,
+                    proxies=self.proxy,
+                    is_handle_error_required=True
+                )
+                update_unset =  {"client_status_iterator": ""}
+                plugin_provider_helper.update_tenant_storage(
+                    self.name, update_unset=update_unset
+                )
+        except NetskopeProviderPluginException:
+            pass
+        except Exception as e:
+            self.logger.error(
+                f"{self.log_prefix}: "
+                f"Unexpected error occurred while {logger_msg}: {e}"
+            )
+        if not is_validation:
+            tenants = plugin_provider_helper.list_tenants()
+            if len(tenants) == 1:
+                banners = [
+                    "BANNER_ERROR_0999",
+                    "BANNER_ERROR_1000",
+                    "BANNER_ERROR_1001",
+                    "BANNER_ERROR_1002",
+                    "BANNER_ERROR_1003",
+                    "BANNER_WARN_1000",
+                ]
+                for banner in banners:
+                    notifier.update_banner_acknowledged(
+                        id=banner, acknowledged=True
+                    )
+            else:
+                self.update_banner(tenant_name)
+
+    def share_analytics_in_user_agent(self, tenant_name, user_agent_analytics):
+        """Share analytics data in user agent."""
+        try:
+            from netskope.common.utils import resolve_secret
+            from netskope_api.iterator.const import Const
+
+            future_time = int(
+                (
+                    datetime.datetime.now() + datetime.timedelta(minutes=60)
+                ).timestamp()
+            )
+            tenant = {
+                "name": tenant_name,
+                "parameters": self.configuration,
+                "storage": self.storage,
+                "checkpoint": self.last_run_at,
+                "use_proxy": self.use_proxy,
+                "proxy": self.proxy,
+            }
+            ALERT = "alert"
+            params = {
+                Const.NSKP_TOKEN: resolve_secret(
+                    tenant["parameters"].get("v2token")
+                ),
+                Const.NSKP_TENANT_HOSTNAME: tenant["parameters"]
+                .get("tenantName")
+                .strip()
+                .strip("/")
+                .removeprefix("https://"),
+                Const.NSKP_USER_AGENT: user_agent_analytics,
+                Const.NSKP_ITERATOR_NAME: f"analytics_{tenant.get('name')}_{ALERT}".replace(
+                    " ", ""
+                ),
+                Const.NSKP_EVENT_TYPE: Const.EVENT_TYPE_ALERT,
+                Const.NSKP_ALERT_TYPE: None,
+            }
+            iterator = NetskopeIterator(params)
+            response = iterator.download(future_time)
+            if response.status_code == 200:
+                self.logger.info(
+                    f"{self.log_prefix}: Analytics sent successfully for {tenant.get('name')} with User-Agent."
+                )
+                return True
+            else:
+                response = handle_status_code(
+                    response,
+                    error_code="CE_1054",
+                    custom_message=(
+                        f"Error occurred while sharing analytics for {tenant.get('name')}"
+                        " in User-Agent with Netskope"
+                    ),
+                )
+                return False
+        except Exception:
+            self.logger.error(
+                f"{self.log_prefix}: Error occurred while sharing analytics for {tenant.get('name')}"
+                " in User-Agent with Netskope",
+                error_code="CE_1055",
+                details=traceback.format_exc(),
+            )
+            return False
